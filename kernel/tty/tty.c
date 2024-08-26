@@ -146,6 +146,7 @@ tty_create_device_file(int minor,
    nfo->create_extra = &tty_create_extra;
    nfo->destroy_extra = &tty_destroy_extra;
    nfo->on_dup_extra = &tty_on_dup_extra;
+   nfo->spec_flags |= VFS_SPFL_DEBUG;
    return 0;
 }
 

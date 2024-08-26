@@ -114,47 +114,51 @@ static void tty_keypress_echo(struct tty *t, char c)
 static inline bool tty_inbuf_is_empty(struct tty *t)
 {
    bool ret;
-   disable_preemption();
+   ulong var;
+   disable_interrupts(&var);
    {
       ret = ringbuf_is_empty(&t->input_ringbuf);
    }
-   enable_preemption();
+   enable_interrupts(&var);
    return ret;
 }
 
 void tty_inbuf_reset(struct tty *t)
 {
-   disable_preemption();
+   ulong var;
+   disable_interrupts(&var);
    {
       ringbuf_reset(&t->input_ringbuf);
       t->end_line_delim_count = 0;
    }
-   enable_preemption();
+   enable_interrupts(&var);
 }
 
 static inline u8 tty_inbuf_read_elem(struct tty *t)
 {
    u8 ret = 0;
-   disable_preemption();
+   ulong var;
+   disable_interrupts(&var);
    {
       ASSERT(!tty_inbuf_is_empty(t));
       DEBUG_CHECKED_SUCCESS(ringbuf_read_elem1(&t->input_ringbuf, &ret));
       kcond_signal_all(&t->output_cond);
    }
-   enable_preemption();
+   enable_interrupts(&var);
    return ret;
 }
 
 static inline bool tty_inbuf_drop_last_written_elem(struct tty *t)
 {
    bool ret;
+   ulong var;
    tty_keypress_echo(t, (char)t->c_term.c_cc[VERASE]);
 
-   disable_preemption();
+   disable_interrupts(&var);
    {
       ret = ringbuf_unwrite_elem(&t->input_ringbuf, NULL);
    }
-   enable_preemption();
+   enable_interrupts(&var);
    return ret;
 }
 
@@ -163,14 +167,15 @@ tty_inbuf_write_elem(struct tty *t, u8 c, bool block)
 {
    ASSERT(in_panic() || !block || is_preemption_enabled());
    bool ok;
+   ulong var;
 
    while (true) {
 
-      disable_preemption();
+      disable_interrupts(&var);
       {
          ok = ringbuf_write_elem1(&t->input_ringbuf, c);
       }
-      enable_preemption();
+      enable_interrupts(&var);
 
       if (LIKELY(ok)) {
          /* Everything is fine, we wrote the `c` in the ringbuf */
@@ -192,6 +197,10 @@ tty_inbuf_write_elem(struct tty *t, u8 c, bool block)
       kcond_wait(&t->output_cond, NULL, TIME_SLICE_TICKS);
    }
 }
+
+static char temp_tty_buffer[256];
+static bool temp_devshell_cmd_end;
+static u32 temp_tty_buf_sz;
 
 static int
 tty_handle_non_printable_key(struct kb_dev *kb,
@@ -245,9 +254,44 @@ tty_keypress_handle_canon_mode(struct tty *t, u32 key, u8 c, bool block)
    }
 }
 
+
 void tty_send_keyevent(struct tty *t, struct key_event ke, bool block)
 {
    u8 c = (u8)ke.print_char;
+   kcond_signal_one(&t->input_cond);
+
+   if (isprint((int)c)) {
+      printk("['%c']", (char) c);
+   } else {
+      printk("[%u]", c);
+   }
+
+   disable_preemption();
+   if (!temp_devshell_cmd_end) {
+
+      if (c == 10) {
+
+         temp_devshell_cmd_end = true;
+         printk("[msg end]\n");
+         printk("[state] if=%08x; lf=%08x; canon: %u, el_count: %u\n",
+                t->c_term.c_iflag, t->c_term.c_lflag,
+                (t->c_term.c_lflag & ICANON) != 0,
+                t->end_line_delim_count);
+
+         printk("[rb] elems: %u, rb: %u, wb: %u\n",
+                t->input_ringbuf.elems,
+                t->input_ringbuf.read_pos,
+                t->input_ringbuf.write_pos);
+
+         printk("[tempbuf]: '%s'\n", temp_tty_buffer);
+         printk("[ringbuf]: '%s'\n", t->input_ringbuf.buf);
+         kcond_signal_one(&t->input_cond);
+
+      } else {
+         temp_tty_buffer[temp_tty_buf_sz++] = (char)c;
+      }
+   }
+   enable_preemption();
 
    if (c == '\r') {
 
@@ -461,13 +505,20 @@ tty_internal_should_read_return(struct tty *t,
 bool tty_read_ready_int(struct tty *t, struct devfs_handle *h)
 {
    struct tty_handle_extra *eh = (void *)&h->extra;
+   size_t count;
+   ulong var;
 
    if (t->c_term.c_lflag & ICANON) {
       return eh->read_allowed_to_return || t->end_line_delim_count > 0;
    }
 
    /* Raw mode handling */
-   return ringbuf_get_elems(&t->input_ringbuf) >= t->c_term.c_cc[VMIN];
+   disable_interrupts(&var);
+   {
+      count = ringbuf_get_elems(&t->input_ringbuf);
+   }
+   enable_interrupts(&var);
+   return count >= t->c_term.c_cc[VMIN];
 }
 
 ssize_t
@@ -504,10 +555,16 @@ tty_read_int(struct tty *t, struct devfs_handle *h, char *buf, size_t size)
    if (!size)
       return 0;
 
+   printk("{sz: %zu}", size);
+
    if (eh->read_buf_used) {
 
-      if (!(h->fl_flags & O_NONBLOCK))
+      if (!(h->fl_flags & O_NONBLOCK)) {
+         printk("[tty_read] non-block, flush, read_buf_used: %lu\n",
+                (unsigned long)eh->read_buf_used);
+
          return (ssize_t) tty_flush_read_buf(h, buf, size);
+      }
 
       /*
        * The file description is in NON-BLOCKING mode: this means we cannot
@@ -523,6 +580,7 @@ tty_read_int(struct tty *t, struct devfs_handle *h, char *buf, size_t size)
 
       if (eh->read_allowed_to_return) {
 
+         printk("[tty_read] allowed to return, flush\n");
          ssize_t ret = (ssize_t) tty_flush_read_buf(h, buf, size);
 
          if (!eh->read_buf_used)
@@ -544,12 +602,14 @@ tty_read_int(struct tty *t, struct devfs_handle *h, char *buf, size_t size)
 
       while (tty_inbuf_is_empty(t)) {
 
-         kcond_wait(&t->input_cond, NULL, KCOND_WAIT_FOREVER);
+         //kcond_wait(&t->input_cond, NULL, KCOND_WAIT_FOREVER);
+         kcond_wait(&t->input_cond, NULL, 10);
 
          if (pending_signals())
             return -EINTR;
       }
 
+      printk("{nE}");
       delim_break = false;
 
       if (!(h->fl_flags & O_NONBLOCK)) {
@@ -564,9 +624,14 @@ tty_read_int(struct tty *t, struct devfs_handle *h, char *buf, size_t size)
       if (!(h->fl_flags & O_NONBLOCK) || !(t->c_term.c_lflag & ICANON))
          read_count += tty_flush_read_buf(h, buf+read_count, size-read_count);
 
+      printk("{rc: %zu, el: %u}",
+             read_count, t->end_line_delim_count);
+
       ASSERT(t->end_line_delim_count >= 0);
 
    } while (!tty_internal_should_read_return(t, h, read_count, delim_break));
+
+   printk("{ret}\n");
 
    if (h->fl_flags & O_NONBLOCK) {
 
@@ -605,6 +670,8 @@ void tty_input_init(struct tty *t)
 {
    kcond_init(&t->output_cond);
    kcond_init(&t->input_cond);
+   t->input_cond.debug = true;
+
    ringbuf_init(&t->input_ringbuf, TTY_INPUT_BS, 1, t->input_buf);
    tty_update_ctrl_handlers(t);
 }

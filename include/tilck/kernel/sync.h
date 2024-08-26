@@ -190,6 +190,7 @@ bool kmutex_is_curr_task_holding_lock(struct kmutex *m);
 struct kcond {
 
    struct list wait_list;
+   bool debug;
 };
 
 #define STATIC_KCOND_INIT(s)                     \

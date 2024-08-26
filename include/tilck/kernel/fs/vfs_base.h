@@ -116,6 +116,7 @@ struct fs_handle_base {
 #define VFS_SPFL_NO_USER_COPY                  (1 << 0)
 #define VFS_SPFL_MMAP_SUPPORTED                (1 << 1)
 #define VFS_SPFL_NO_LF                         (1 << 2)
+#define VFS_SPFL_DEBUG                         (1 << 3)
 
 /*
  * vfs_mmap()'s flags

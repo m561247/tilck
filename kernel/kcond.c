@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 
 #include <tilck/common/string_util.h>
+#include <tilck/common/printk.h>
 
 #include <tilck/kernel/sync.h>
 #include <tilck/kernel/hal.h>
@@ -58,10 +59,16 @@ panic_retry_hack:
    } else {
 
       /* Go to sleep until a signal is fired or timeout happens */
+      if (c->debug) {
+         printk("input_cond: task %d going to sleep\n", curr->tid);
+      }
       enter_sleep_wait_state();
    }
 
    /* ------------------- We've been woken up ------------------- */
+   if (c->debug) {
+      printk("input_cond: task %d woke up\n", curr->tid);
+   }
 
    /*
     * wait_obj_reset() returns the older value of wobj.ptr: in case it was
@@ -84,7 +91,7 @@ panic_retry_hack:
        * When we're in panic and kopt_panic_kb is enabled, we have just a single
        * task, no scheduler and no IRQs other than from PS/2 or COM1. Still,
        * the TTY layer needs condition variables to work in order to canonical
-       * mode to work. We cannot sleep in the proper sense, by we can HALT the
+       * mode to work. We cannot sleep in the proper sense, but we can HALT the
        * the CPU and wait for an IRQ to wake us up. Now, the problem is that we
        * will wake up on every IRQ, even if we never got signalled. That would
        * incorrect behavior from the caller point of view therefore, we need
@@ -99,6 +106,9 @@ panic_retry_hack:
          goto panic_retry_hack;
    }
 
+   if (c->debug) {
+      printk("input_cond: task %d woke up and ret: %u\n", curr->tid, ret);
+   }
    return ret;
 }
 
@@ -126,9 +136,13 @@ kcond_signal_int(struct kcond *c, struct wait_obj *wo)
       return;
    }
 
+   ASSERT(ti != NULL);
    if (ti->state != TASK_STATE_SLEEPING) {
 
       /* the signal is lost, that's typical for conditions */
+      if (c->debug) {
+         printk("input_cond: signal lost for task %d\n", ti->tid);
+      }
 
       if (wo->type == WOBJ_MWO_ELEM)
          wait_obj_reset(wo);
@@ -138,11 +152,17 @@ kcond_signal_int(struct kcond *c, struct wait_obj *wo)
 
    if (wo->type != WOBJ_MWO_ELEM) {
       ASSERT(wo->type == WOBJ_KCOND);
+      if (c->debug) {
+         printk("input_cond: mwo: cancel wake_up timer for task %d\n", ti->tid);
+      }
       task_cancel_wakeup_timer(ti);
    } else {
       ASSERT(CONTAINER_OF(wo, struct mwobj_elem, wobj)->type == WOBJ_KCOND);
    }
 
+   if (c->debug) {
+      printk("input_cond: wake up task %d\n", ti->tid);
+   }
    wait_obj_reset(wo);
    wake_up(ti);
 }
@@ -159,6 +179,11 @@ void kcond_signal_one(struct kcond *c)
             list_first_obj(&c->wait_list, struct wait_obj, wait_list_node);
 
          kcond_signal_int(c, wobj);
+
+      } else {
+
+        if (c->debug)
+           printk("input_cond: sig one: empty wait list\n");
       }
    }
    enable_preemption();
@@ -170,6 +195,11 @@ void kcond_signal_all(struct kcond *c)
    disable_preemption();
    {
       DEBUG_ONLY(check_not_in_irq_handler());
+
+      if (c->debug) {
+         if (list_is_empty(&c->wait_list))
+            printk("input_cond: sig all: empty wait list\n");
+      }
 
       list_for_each(wo_pos, temp, &c->wait_list, wait_list_node) {
          kcond_signal_int(c, wo_pos);

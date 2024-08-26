@@ -76,6 +76,10 @@ poll_set_conds(struct multi_obj_waiter *w,
          if (c != NULL) {
 
             ASSERT(idx < cond_cnt);
+            if (c->debug) {
+               printk("[%d] poll: register task on input_cond\n",
+                      get_curr_tid());
+            }
             mobj_waiter_set(w, idx++, WOBJ_KCOND, c, &c->wait_list);
          }
       }
@@ -237,6 +241,7 @@ int sys_poll(struct pollfd *user_fds, nfds_t nfds, int timeout)
    struct pollfd *fds = curr->args_copybuf;
    int rc, ready_fds_cnt;
    int cond_cnt = 0;
+   bool tty = false;
 
    if (sizeof(struct pollfd) * nfds > ARGS_COPYBUF_SIZE)
       return -EINVAL;
@@ -247,18 +252,55 @@ int sys_poll(struct pollfd *user_fds, nfds_t nfds, int timeout)
    for (u32 i = 0; i < nfds; i++)
       fds[i].revents = 0;
 
+   for (nfds_t i = 0; i < nfds; i++) {
+
+      fs_handle h = get_fs_handle(fds[i].fd);
+      struct fs_handle_base *hb = h;
+
+      if (hb->spec_flags & VFS_SPFL_DEBUG) {
+
+         printk("[%d] poll: prepare to poll on TTY; "
+                "nfds: %u, timeout: %d\n",
+                get_curr_tid(),
+                (u32)nfds,
+                timeout);
+
+         tty = true;
+         break;
+      }
+   }
+
    ready_fds_cnt = poll_count_ready_fds(fds, nfds);
 
-   if (ready_fds_cnt > 0)
+   if (ready_fds_cnt > 0) {
+
+      if (tty)
+         printk("[%d] poll: tty probably ready (nfds: %u)\n",
+                get_curr_tid(), (u32)nfds);
+
       goto end;
+   }
 
    if (timeout != 0)
       cond_cnt = poll_count_conds(fds, nfds);
 
    if (cond_cnt > 0) {
 
-      if ((rc = poll_wait_on_cond(fds, nfds, timeout, cond_cnt)) < 0)
+      if (tty)
+         printk("[%d] poll: prepare to wait on TTY cond\n", get_curr_tid());
+
+      if ((rc = poll_wait_on_cond(fds, nfds, timeout, cond_cnt)) < 0) {
+         if (tty) {
+            printk("[%d] poll: wait on TTY cond failed: %d\n",
+                   get_curr_tid(), rc);
+         }
          return rc;
+      }
+
+      if (tty) {
+         printk("[%d] poll: after wait on TTY, ready_fds_cnt: %d\n",
+                get_curr_tid(), rc);
+      }
 
       ready_fds_cnt = rc;
 
@@ -278,6 +320,9 @@ end:
    if (copy_to_user(user_fds, fds, sizeof(struct pollfd) * nfds))
       return -EFAULT;
 
+   if (tty)
+      printk("[%d] poll: return %d after wait on TTY\n",
+             get_curr_tid(), ready_fds_cnt);
    return ready_fds_cnt;
 }
 
